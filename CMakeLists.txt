@@ -17,4 +17,5 @@ add_subdirectory(lib/minifb)
 ## Project targets
 
 add_executable(emu-minimal main.cpp)
+target_link_libraries(emu-minimal minifb)
 set_property(TARGET emu-minimal PROPERTY CXX_STANDARD 17)

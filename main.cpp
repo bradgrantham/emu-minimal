@@ -79,9 +79,15 @@ constexpr int UIUpdateFrequency = 30;
 
 struct Interface
 {
+    bool succeeded{false};
     bool attemptIterate()
     {
         return true;
+    }
+
+    Interface()
+    {
+        succeeded = true;
     }
 
 //     clk_t calculateNextActivity()
@@ -93,7 +99,7 @@ struct Interface
 
 // Do not repeat work if called twice with same clock.
     // void updatePastClock(const Clock& systemClock)
-}
+};
 
 void usage(const char *name)
 {
@@ -110,9 +116,7 @@ int main(int argc, char **argv)
     argc -= 1;
     argv += 1;
 
-    bool paused = false;
-
-    while((argc > 0) && (argv[0][0] == '-')) {
+    while((argc > 1) && (argv[0][0] == '-')) {
         if(
             (strcmp(argv[0], "-help") == 0) ||
             (strcmp(argv[0], "-h") == 0) ||
@@ -136,7 +140,7 @@ int main(int argc, char **argv)
 
     Clock systemClock(3686400);
 
-    Interface interface();
+    Interface interface{};
     if(!interface.succeeded) {
         fprintf(stderr, "opening the user interface failed.\n");
         exit(EXIT_FAILURE);
