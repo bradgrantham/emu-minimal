@@ -2,6 +2,7 @@
 #include <unordered_map>
 #include <map>
 #include <string>
+#include <queue>
 #include <array>
 #include <vector>
 #include <cstdio>
@@ -16,7 +17,7 @@
 
 #include <MiniFB.h>
 
-constexpr bool debug = true;
+constexpr bool debug = false;
 constexpr int QuiescentEvaluateMaxCycles = 100;
 constexpr uint64_t SystemClockRate = 3686400;
 constexpr uint64_t CPUClockRate = 3686400;
@@ -442,6 +443,54 @@ struct Counter : public Register<SIZE, InputBus, OutputBus>
     }
 };
 
+struct ConsoleIO : public Block
+{
+    Wire& clock;
+    Wire& input_enable;
+    Wire& output_enable;
+    Bus<8>& input;
+    std::vector<Bus<8>*> outputs;
+    bool oldClock = false;
+    std::queue<uint8_t> inputBuffer;
+
+    ConsoleIO(const std::string& name, Wire& clock, Wire& input_enable, Wire& output_enable, Bus<8>& input, std::vector<Bus<8>*> outputs) :
+        Block(name),
+        clock(clock),
+        input_enable(input_enable),
+        output_enable(output_enable),
+        input(input),
+        outputs(outputs)
+    {}
+    virtual bool Evaluate()
+    {
+        bool changed = false;
+        if(!oldClock && clock && input_enable) {
+            // printf("%s input enabled; input = 0x%x\n", this->name.c_str(), (uint32_t)input);
+            putchar(input);
+            changed = true;
+        }
+        if(!oldClock && clock && output_enable) {
+            uint8_t value = 0xFF;
+            if(!inputBuffer.empty()) {
+                value = inputBuffer.front();
+                // printf("requested UART; returned 0x%X from the buffer; XXX implement\n", value);
+                inputBuffer.pop();
+                changed = true;
+            } else {
+                // printf("requested UART; nothing available, returning 0xFF\n");
+            }
+            for(auto* output: this->outputs) {
+                auto old = *output;
+                *output = value;
+                // printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
+                changed = changed || (old != value);
+            }
+        }
+        oldClock = clock;
+        return changed;
+    }
+};
+
 struct RAMAndFlash : public Block
 {
     Wire& reset;
@@ -475,13 +524,13 @@ struct RAMAndFlash : public Block
         uint16_t ramaddress = ((memory_address_high & 0x7F) << 8) | (memory_address_low);
         uint32_t flashaddress = (bank << 11) | ((memory_address_high & 0x7F) << 8) | (memory_address_low);
         if(input_enable) {
-            printf("%s input enabled; is_ram = %d, MA = 0x%x, ramaddress = 0x%x, flashaddress = 0x%x\n", this->name.c_str(), is_ram ? 1 : 0, (memory_address_high << 8) | (memory_address_low), ramaddress, flashaddress);
+            // printf("%s input enabled; is_ram = %d, MA = 0x%x, ramaddress = 0x%x, flashaddress = 0x%x\n", this->name.c_str(), is_ram ? 1 : 0, (memory_address_high << 8) | (memory_address_low), ramaddress, flashaddress);
             if(is_ram) {
-                printf("%s input enable, write 0x%x to RAM 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                // printf("%s input enable, write 0x%x to RAM 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
                 changed = RAM[ramaddress] != input;
                 RAM[ramaddress] = input;
             } else {
-                printf("%s input enable, write 0x%x to Flash 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                // printf("%s input enable, write 0x%x to Flash 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
                 changed = Flash[flashaddress] != input;
                 Flash[flashaddress] = input;
             }
@@ -490,15 +539,15 @@ struct RAMAndFlash : public Block
             uint8_t value;
             if(!is_ram) {
                 value = Flash[flashaddress];
-                printf("%s output enable, read 0x%x from Flash 0x%x\n", this->name.c_str(), value, flashaddress);
+                // printf("%s output enable, read 0x%x from Flash 0x%x\n", this->name.c_str(), value, flashaddress);
             } else {
                 value = RAM[ramaddress];
-                printf("%s output enable, read 0x%x from RAM 0x%x\n", this->name.c_str(), value, ramaddress);
+                // printf("%s output enable, read 0x%x from RAM 0x%x\n", this->name.c_str(), value, ramaddress);
             }
             for(auto* output: this->outputs) {
                 auto old = *output;
                 *output = value;
-                printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
+                // printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
                 changed = changed || (old != value);
             }
         }
@@ -536,6 +585,8 @@ struct System
     Wire mihSignal = false;
     Wire kiSignal = false;
     Wire iiSignal = false;
+    Wire tiSignal = false;
+    Wire toSignal = false;
 
     Wire alwaysTrue = true;
     Wire alwaysFalse = false;
@@ -561,9 +612,10 @@ struct System
     RAMAndFlash Memory{"Memory", reset, clock, RISignal, ROSignal, MALToMemory, MAHToMemory, BANKToMemory, MainBus, {&MainBus}};
     // Adder
     // ControlLogic
-    // UART
 
-    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory};
+    ConsoleIO UART{"UART", clock, tiSignal, toSignal, MainBus, {&MainBus}};
+
+    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART};
 
     System()
     {
@@ -600,7 +652,7 @@ struct System
             if(cycles >= QuiescentEvaluateMaxCycles) {
                 throw std::runtime_error(std::string("Step: exceeded maximum number of cycles to achieve quiescence with clock high"));
             }
-            printf("    clock low in loop:\n");
+            if(debug) printf("    clock low in loop:\n");
             changed = false;
             for(auto* b : blocks) {
                 bool block_changed = b->Evaluate();
@@ -623,7 +675,6 @@ void TestSystem()
         if(debug) printf("Reset test\n");
         sys.reset = true;
         sys.Step();
-        sys.reset = false;
         assert((sys.StepCounter.value == 0) && "reset StepCounter");
         assert((sys.ARegister.value == 0) && "reset ARegister");
         assert((sys.BRegister.value == 0) && "reset BRegister");
@@ -638,8 +689,6 @@ void TestSystem()
         sys.ARegister.value = 0x5a;
         sys.BRegister.value = 0x00;
         sys.Step();
-        sys.AOSignal = false;
-        sys.BISignal = false;
         assert((sys.BRegister.value == 0x5a) && "load BRegister");
         assert((sys.StepCounter.value == 1) && "increment StepCounter");
     }
@@ -668,12 +717,10 @@ void TestSystem()
         sys.Step();
         sys.kiSignal = false;
         assert((sys.BANKRegister.value == 0x0f) && "load BANKAH");
-        sys.AOSignal = false;
     }
 
     {
         System sys; sys.reset = true; sys.Step(); sys.reset = false;
-
 
         if(debug) printf("RAM write test\n");
 
@@ -684,14 +731,11 @@ void TestSystem()
         sys.ARegister.value = 0xBA;
         sys.RISignal = true;
         sys.Step();
-        sys.RISignal = false;
-        sys.AOSignal = false;
         assert((sys.Memory.RAM[0xDEAD & 0x7FFF] == 0xBA) && "write RAM");
     }
 
     {
         System sys; sys.reset = true; sys.Step(); sys.reset = false;
-
 
         if(debug) printf("Flash write test\n");
 
@@ -703,14 +747,11 @@ void TestSystem()
         sys.ARegister.value = 0xCA;
         sys.RISignal = true;
         sys.Step();
-        sys.RISignal = false;
-        sys.AOSignal = false;
         assert((sys.Memory.Flash[(0x5 << 11) | 0x1337] == 0xCA) && "write Flash");
     }
 
     {
         System sys; sys.reset = true; sys.Step(); sys.reset = false;
-
 
         if(debug) printf("RAM read test\n");
 
@@ -719,13 +760,11 @@ void TestSystem()
         sys.Memory.RAM[0xDECA & 0x7FFF] = 0xA5;
         sys.ROSignal = true;
         sys.Step();
-        sys.ROSignal = false;
         assert((sys.Memory.RAM[0xDECA & 0x7FFF] == 0xA5) && "read RAM");
     }
 
     {
         System sys; sys.reset = true; sys.Step(); sys.reset = false;
-
 
         if(debug) printf("Flash read test\n");
 
@@ -735,8 +774,33 @@ void TestSystem()
         sys.Memory.Flash[(0x6 << 11) | 0x0666] = 0x3F;
         sys.ROSignal = true;
         sys.Step();
-        sys.ROSignal = false;
         assert((sys.Memory.Flash[(0x6 << 11) | 0x0666] == 0x3F) && "read Flash");
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+        if(debug) printf("UART write test\n");
+
+        sys.AOSignal = true;
+        sys.ARegister.value = '?';
+        sys.tiSignal = true;
+        sys.Step();
+        if(debug) printf("    Should have printed a '?'\n");
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+        if(debug) printf("UART read test\n");
+
+        sys.AISignal = true;
+        sys.UART.inputBuffer.push('!');
+        sys.toSignal = true;
+        sys.Step();
+        assert((sys.ARegister.value == '!') && "read UART");
+        sys.Step();
+        assert((sys.ARegister.value == 0xFF) && "read UART");
     }
 }
 
@@ -922,7 +986,9 @@ int main(int argc, char **argv)
 
     if(true) {
         TestSystem();
+        exit(EXIT_FAILURE);
     }
+
     printf("Power up.\n");
     bool done = false;
     while(!done) {
