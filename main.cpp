@@ -274,7 +274,7 @@ struct Bus: public std::array<Wire, SIZE>
         }
         return v;
     }
-    Bus<SIZE> operator =(uint32_t v)
+    Bus<SIZE>& operator =(uint32_t v)
     {
         for(size_t i = 0; i < SIZE; i++) {
             (*this)[i] = v & (1 << i);
@@ -290,7 +290,7 @@ struct Buffer : public std::array<Wire, SIZE>
     Buffer(const std::string& name) :
         name(name)
     {}
-    Buffer<SIZE> operator =(uint32_t v)
+    Buffer<SIZE>& operator =(uint32_t v)
     {
         for(size_t i = 0; i < SIZE; i++) {
             (*this)[i] = v & (1 << i);
@@ -331,6 +331,12 @@ struct Register : public Block
     std::vector<OutputBus*> outputs;
     Buffer<SIZE> value;
 
+    Register<SIZE, InputBus, OutputBus>& operator=(uint32_t v)
+    {
+        value = v;
+        return *this;
+    }
+
     Register(const std::string& name, Wire& reset, Wire& clock, Wire& input_enable, Wire& output_enable, InputBus& input, std::vector<OutputBus*>outputs) :
         Block(name),
         reset(reset),
@@ -353,18 +359,18 @@ struct Register : public Block
                 auto old = value;
                 value = input;
                 changed = value != old;
-                printf("%s input enable, value now 0x%x\n", this->name.c_str(), (uint32_t)value);
+                // printf("%s input enable, value now 0x%x\n", this->name.c_str(), (uint32_t)value);
             }
         }
         if(output_enable) {
-            printf("%s output enable\n", this->name.c_str());
+            // printf("%s output enable\n", this->name.c_str());
             if(clock) {
-                printf("%s clock enable\n", this->name.c_str());
+                // printf("%s clock enable\n", this->name.c_str());
                 for(auto* output: outputs) {
                     auto old = *output;
                     changed = changed || (*output != value);
                     *output = value;
-                    printf("%s value is 0x%x, output is 0x%x\n", this->name.c_str(), (uint32_t)value, (uint32_t)*output);
+                    // printf("%s value is 0x%x, output is 0x%x\n", this->name.c_str(), (uint32_t)value, (uint32_t)*output);
                 }
             }
             return changed;
@@ -465,27 +471,35 @@ struct RAMAndFlash : public Block
     virtual bool Evaluate()
     {
         bool changed = false;
-        uint16_t is_flash = memory_address_high & 0x80;
-        uint16_t ramaddress = ((memory_address_high << 8) & 0x7F) | (memory_address_low);
-        uint32_t flashaddress = (bank << 12) | (memory_address_high << 8) | (memory_address_low);
+        uint16_t is_ram = memory_address_high & 0x80;
+        uint16_t ramaddress = ((memory_address_high & 0x7F) << 8) | (memory_address_low);
+        uint32_t flashaddress = (bank << 11) | ((memory_address_high & 0x7F) << 8) | (memory_address_low);
         if(input_enable) {
-            if(!is_flash) {
+            printf("%s input enabled; is_ram = %d, MA = 0x%x, ramaddress = 0x%x, flashaddress = 0x%x\n", this->name.c_str(), is_ram ? 1 : 0, (memory_address_high << 8) | (memory_address_low), ramaddress, flashaddress);
+            if(is_ram) {
+                printf("%s input enable, write 0x%x to RAM 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                changed = RAM[ramaddress] != input;
                 RAM[ramaddress] = input;
-                changed = true;
+            } else {
+                printf("%s input enable, write 0x%x to Flash 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                changed = Flash[flashaddress] != input;
+                Flash[flashaddress] = input;
             }
         }
         if(output_enable) {
             uint8_t value;
-            if(is_flash) {
+            if(!is_ram) {
                 value = Flash[flashaddress];
+                printf("%s output enable, read 0x%x from Flash 0x%x\n", this->name.c_str(), value, flashaddress);
             } else {
                 value = RAM[ramaddress];
+                printf("%s output enable, read 0x%x from RAM 0x%x\n", this->name.c_str(), value, ramaddress);
             }
             for(auto* output: this->outputs) {
                 auto old = *output;
-                // printf("old output value = 0x%x\n", (uint32_t) old);
-                changed = changed || (*output != value);
                 *output = value;
+                printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
+                changed = changed || (old != value);
             }
         }
         return changed;
@@ -564,7 +578,7 @@ struct System
         int cycles = 0;
         do {
             if(cycles >= QuiescentEvaluateMaxCycles) {
-                throw "Step: exceeded maximum number of cycles to achieve quiescence";
+                throw std::runtime_error(std::string("Step: exceeded maximum number of cycles to achieve quiescence with clock high"));
             }
             if(debug) printf("    clock high in loop:\n");
             changed = false;
@@ -584,7 +598,7 @@ struct System
         cycles = 0;
         do {
             if(cycles >= QuiescentEvaluateMaxCycles) {
-                throw "Step: exceeded maximum number of cycles to achieve quiescence";
+                throw std::runtime_error(std::string("Step: exceeded maximum number of cycles to achieve quiescence with clock high"));
             }
             printf("    clock low in loop:\n");
             changed = false;
@@ -603,48 +617,127 @@ struct System
 
 void TestSystem()
 {
-    System sys;
+    {
+        System sys;
 
-    if(debug) printf("Reset test\n");
-    sys.reset = true;
-    sys.Step();
-    sys.reset = false;
-    assert((sys.StepCounter.value == 0) && "reset StepCounter");
-    assert((sys.ARegister.value == 0) && "reset ARegister");
-    assert((sys.BRegister.value == 0) && "reset BRegister");
+        if(debug) printf("Reset test\n");
+        sys.reset = true;
+        sys.Step();
+        sys.reset = false;
+        assert((sys.StepCounter.value == 0) && "reset StepCounter");
+        assert((sys.ARegister.value == 0) && "reset ARegister");
+        assert((sys.BRegister.value == 0) && "reset BRegister");
+    }
 
-    if(debug) printf("Clock test 1\n");
-    sys.AOSignal = true;
-    sys.BISignal = true;
-    sys.ARegister.value = 0x5a;
-    sys.BRegister.value = 0x00;
-    sys.Step();
-    sys.AOSignal = false;
-    sys.BISignal = false;
-    assert((sys.BRegister.value == 0x5a) && "load BRegister");
-    assert((sys.StepCounter.value == 1) && "increment StepCounter");
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
 
-    if(debug) printf("MAH MAL BNK test\n");
+        if(debug) printf("Clock test 1\n");
+        sys.AOSignal = true;
+        sys.BISignal = true;
+        sys.ARegister.value = 0x5a;
+        sys.BRegister.value = 0x00;
+        sys.Step();
+        sys.AOSignal = false;
+        sys.BISignal = false;
+        assert((sys.BRegister.value == 0x5a) && "load BRegister");
+        assert((sys.StepCounter.value == 1) && "increment StepCounter");
+    }
 
-    sys.AOSignal = true;
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
 
-    sys.ARegister.value = 0xca;
-    sys.milSignal = true;
-    sys.Step();
-    sys.milSignal = false;
-    assert((sys.MALRegister.value == 0xca) && "load MAL");
+        if(debug) printf("MAH MAL BNK test\n");
 
-    sys.ARegister.value = 0xfe;
-    sys.mihSignal = true;
-    sys.Step();
-    sys.mihSignal = false;
-    assert((sys.MAHRegister.value == 0xfe) && "load MAH");
+        sys.AOSignal = true;
 
-    sys.ARegister.value = 0xff;
-    sys.kiSignal = true;
-    sys.Step();
-    sys.kiSignal = false;
-    assert((sys.BANKRegister.value == 0x0f) && "load BANKAH");
+        sys.ARegister.value = 0xfe;
+        sys.milSignal = true;
+        sys.Step();
+        sys.milSignal = false;
+        assert((sys.MALRegister.value == 0xfe) && "load MAL");
+
+        sys.ARegister.value = 0xca;
+        sys.mihSignal = true;
+        sys.Step();
+        sys.mihSignal = false;
+        assert((sys.MAHRegister.value == 0xca) && "load MAH");
+
+        sys.ARegister.value = 0xff;
+        sys.kiSignal = true;
+        sys.Step();
+        sys.kiSignal = false;
+        assert((sys.BANKRegister.value == 0x0f) && "load BANKAH");
+        sys.AOSignal = false;
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+
+        if(debug) printf("RAM write test\n");
+
+        sys.MAHRegister = 0xDE;
+        sys.MALRegister = 0xAD;
+        sys.Memory.RAM[0xDEAD & 0x7FFF] = 0x5A;
+        sys.AOSignal = true;
+        sys.ARegister.value = 0xBA;
+        sys.RISignal = true;
+        sys.Step();
+        sys.RISignal = false;
+        sys.AOSignal = false;
+        assert((sys.Memory.RAM[0xDEAD & 0x7FFF] == 0xBA) && "write RAM");
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+
+        if(debug) printf("Flash write test\n");
+
+        sys.MAHRegister = 0x13;
+        sys.MALRegister = 0x37;
+        sys.BANKRegister = 0x5;
+        sys.Memory.Flash[(0x5 << 11) | 0x1337] = 0x5a;
+        sys.AOSignal = true;
+        sys.ARegister.value = 0xCA;
+        sys.RISignal = true;
+        sys.Step();
+        sys.RISignal = false;
+        sys.AOSignal = false;
+        assert((sys.Memory.Flash[(0x5 << 11) | 0x1337] == 0xCA) && "write Flash");
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+
+        if(debug) printf("RAM read test\n");
+
+        sys.MAHRegister = 0xDE;
+        sys.MALRegister = 0xCA;
+        sys.Memory.RAM[0xDECA & 0x7FFF] = 0xA5;
+        sys.ROSignal = true;
+        sys.Step();
+        sys.ROSignal = false;
+        assert((sys.Memory.RAM[0xDECA & 0x7FFF] == 0xA5) && "read RAM");
+    }
+
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+
+        if(debug) printf("Flash read test\n");
+
+        sys.MAHRegister = 0x06;
+        sys.MALRegister = 0x66;
+        sys.BANKRegister = 0x6;
+        sys.Memory.Flash[(0x6 << 11) | 0x0666] = 0x3F;
+        sys.ROSignal = true;
+        sys.Step();
+        sys.ROSignal = false;
+        assert((sys.Memory.Flash[(0x6 << 11) | 0x0666] == 0x3F) && "read Flash");
+    }
 }
 
 
