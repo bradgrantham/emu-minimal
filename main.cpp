@@ -430,12 +430,14 @@ template <int SIZE, typename InputBus, typename OutputBus>
 struct Counter : public Register<SIZE, InputBus, OutputBus>
 {
     Wire& load;
+    Wire& increment;
     Wire& carry;
     bool oldclock = false;
 
-    Counter(const std::string& name, Wire& reset, Wire& clock, Wire& load, Wire& output_enable, InputBus& input, std::vector<OutputBus*> outputs, Wire& carry) :
+    Counter(const std::string& name, Wire& reset, Wire& clock, Wire& increment, Wire& load, Wire& output_enable, InputBus& input, std::vector<OutputBus*> outputs, Wire& carry) :
         Register<SIZE, InputBus, OutputBus>(name, reset, clock, load, output_enable, input, outputs),
         load(load),
+        increment(increment),
         carry(carry)
     {
     }
@@ -450,7 +452,7 @@ struct Counter : public Register<SIZE, InputBus, OutputBus>
                 changed = this->value != this->input;
                 this->value = this->input;
             } else {
-                if(!oldclock && this->clock) {
+                if(!oldclock && this->clock & increment) {
                     changed = true;
                     carry = (this->value + 1 >= (1 << SIZE));
                     this->value = this->value + 1;
@@ -630,6 +632,83 @@ struct RAMAndFlash : public Block
     }
 };
 
+struct ControlROM : public Block
+{
+    Bus<3>& flags;
+    Bus<6>& instruction;
+    Bus<4>& step;
+    Wire& CISignal;
+    Wire& COSignal;
+    Wire& CEMESignal;
+    Wire& TRSignal;
+    Wire& ICSignal;
+    Wire& ECSignal;
+    Wire& ESSignal;
+    Wire& EOFISignal;
+    Wire& HISignal;
+    Wire& MISignal;
+    Wire& RISignal;
+    Wire& ROSignal;
+    Wire& AISignal;
+    Wire& AOSignal;
+    Wire& BISignal;
+    Wire& BOSignal;
+
+    bool disableForDebug = false;
+
+    uint32_t oldromaddress = 0;
+    ControlROM(const std::string& name, Bus<3>& flags, Bus<6>& instruction, Bus<4>& step, Wire& CISignal, Wire& COSignal, Wire& CEMESignal, Wire& TRSignal, Wire& ICSignal, Wire& ECSignal, Wire& ESSignal, Wire& EOFISignal, Wire& HISignal, Wire& MISignal, Wire& RISignal, Wire& ROSignal, Wire& AISignal, Wire& AOSignal, Wire& BISignal, Wire& BOSignal) :
+        Block(name),
+        flags(flags),
+        instruction(instruction),
+        step(step),
+        CISignal(CISignal),
+        COSignal(COSignal),
+        CEMESignal(CEMESignal),
+        TRSignal(TRSignal),
+        ICSignal(ICSignal),
+        ECSignal(ECSignal),
+        ESSignal(ESSignal),
+        EOFISignal(EOFISignal),
+        HISignal(HISignal),
+        MISignal(MISignal),
+        RISignal(RISignal),
+        ROSignal(ROSignal),
+        AISignal(AISignal),
+        AOSignal(AOSignal),
+        BISignal(BISignal),
+        BOSignal(BOSignal)
+    { }
+    bool Evaluate()
+    {
+        if(disableForDebug) {
+            return false;
+        }
+
+        uint32_t romaddress = (flags << 10) | (instruction << 4) | (step << 0);
+        bool changed = romaddress != oldromaddress;
+        oldromaddress = romaddress;
+        uint16_t microcode_word = mEEPROM[romaddress];
+        CISignal = microcode_word & CI;
+        COSignal = microcode_word & CO;
+        CEMESignal = microcode_word & CEME;
+        TRSignal = microcode_word & TR;
+        ICSignal = microcode_word & IC;
+        ECSignal = microcode_word & EC;
+        ESSignal = microcode_word & ES;
+        EOFISignal = microcode_word & EOFI;
+        HISignal = microcode_word & HI;
+        MISignal = microcode_word & MI;
+        RISignal = microcode_word & RI;
+        ROSignal = microcode_word & RO;
+        AISignal = microcode_word & AI;
+        AOSignal = microcode_word & AO;
+        BISignal = microcode_word & BI;
+        BOSignal = microcode_word & BO;
+        return changed;
+    }
+};
+
 struct System
 {
     Bus<8> MainBus{"MainBus"};
@@ -644,16 +723,22 @@ struct System
     Bus<3> FlagsToControlLogicBus{"FlagsToControlLogicBus"};
     Bus<6> InstructionToControlLogicBus{"InstructionToControlLogicBus"};
     Bus<4> StepToControlLogicBus{"StepToControlLogicBus"};
+    Wire CISignal = false;
+    Wire COSignal = false;
+    Wire CEMESignal = false;
+    Wire TRSignal = false;
+    Wire ICSignal = false;
+    Wire ECSignal = false;
+    Wire ESSignal = false;
+    Wire EOFISignal = false;
+    Wire HISignal = false;
+    Wire MISignal = false;
+    Wire RISignal = false;
+    Wire ROSignal = false;
     Wire AISignal = false;
     Wire AOSignal = false;
     Wire BISignal = false;
     Wire BOSignal = false;
-    Wire ICSignal = false;
-    Wire EOFISignal = false;
-    Wire RISignal = false;
-    Wire ROSignal = false;
-    Wire ESSignal = false;
-    Wire ECSignal = false;
     Wire cilSignal = false;
     Wire colSignal = false;
     Wire cihSignal = false;
@@ -674,8 +759,11 @@ struct System
 
     RegisterWithTap<8, Bus<8>, Bus<8>> ARegister{"ARegister", reset, clock, AISignal, AOSignal, MainBus, {&MainBus}, AToAdder};
     RegisterWithTap<8, Bus<8>, Bus<8>> BRegister{"BRegister", reset, clock, BISignal, BOSignal, MainBus, {&MainBus}, BToAdder};
-    Register<8, Bus<8>, Bus<8>> PCLRegister{"PCLRegister", reset, clock, cilSignal, colSignal, MainBus, {&MainBus}};
-    Register<8, Bus<8>, Bus<8>> PCHRegister{"PCHRegister", reset, clock, cihSignal, cohSignal, MainBus, {&MainBus}};
+    // XXX PC is supposed to be hooked to CEME for increment on clock
+    Wire PCLcarry;
+    Wire PCHcarry_discard;
+    Counter<8, Bus<8>, Bus<8>> PCLRegister{"PCLRegister", reset, clock, CEMESignal, cilSignal, colSignal, MainBus, {&MainBus}, PCLcarry};
+    Counter<8, Bus<8>, Bus<8>> PCHRegister{"PCHRegister", reset, clock, PCLcarry, cihSignal, cohSignal, MainBus, {&MainBus}, PCHcarry_discard};
     Register<8, Bus<8>, Bus<8>> MALRegister{"MALRegister", reset, clock, milSignal, alwaysTrue, MainBus, {&MALToMemory}};
     Register<8, Bus<8>, Bus<8>> MAHRegister{"MAHRegister", reset, clock, mihSignal, alwaysTrue, MainBus, {&MAHToMemory}};
     Register<4, Bus<8>, Bus<4>> BANKRegister{"BANKRegister", reset, clock, kiSignal, alwaysTrue, MainBus, {&BANKToMemory}};
@@ -685,7 +773,7 @@ struct System
     Wire StepCounterReset;
     Or ICOrReset{"ICOrReset", ICSignal, reset, StepCounterReset};
     Wire carry_discarded;
-    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}, carry_discarded};
+    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}, carry_discarded};
 
     RAMAndFlash Memory{"Memory", reset, clock, RISignal, ROSignal, MALToMemory, MAHToMemory, BANKToMemory, MainBus, {&MainBus}};
 
@@ -693,9 +781,11 @@ struct System
 
     Adder ALU{"ALU", clock, ESSignal, ECSignal, AToAdder, BToAdder, EOFISignal, MainBus, AdderFlagsBus};
 
-    // ControlROMAndLogic ControlLogic{"Control", clock, EOFISignal, iiSignal, ICSignal, CISignal, COSignal, CEMESignal, TRSignal, ICSignal, ECSignal, ESSignal, EOFISignal, HISignal, MISignal, RISignal, ROSignal, AISignal, AOSignal, BISignal, BOSignal, cohSignal, colSignal, cihSignal, cilSignal, mihSignal, milSignal, tiSignal, toSignal, iiSignal, kiSignal};
+    ControlROM MicrocodeROM{"MicrocodeROM", FlagsToControlLogicBus, InstructionToControlLogicBus, StepToControlLogicBus, CISignal, COSignal, CEMESignal, TRSignal, ICSignal, ECSignal, ESSignal, EOFISignal, HISignal, MISignal, RISignal, ROSignal, AISignal, AOSignal, BISignal, BOSignal};
 
-    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU};
+    // ControlLogic Logic{"Logic", HI, CI, CO, ME, TR, CEME, EC, cohSignal, colSignal, cihSignal, cilSignal, mihSignal, milSignal, tiSignal, toSignal, iiSignal, kiSignal};
+
+    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU, &MicrocodeROM};
 
     System()
     {
@@ -763,7 +853,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("Clock test 1\n");
         sys.AOSignal = true;
@@ -776,24 +866,53 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
+
+        if(debug) printf("PCL PCH test\n");
+
+        sys.AOSignal = true;
+        sys.ARegister.value = 0xca;
+        sys.cihSignal = true;
+        sys.Step();
+        sys.cihSignal = false;
+        assert((sys.PCHRegister.value == 0xca) && "load PCH");
+
+        sys.AOSignal = true;
+        sys.ARegister.value = 0xfe;
+        sys.cilSignal = true;
+        sys.Step();
+        sys.cilSignal = false;
+        sys.AOSignal = false;
+        assert((sys.PCLRegister.value == 0xfe) && "load PCL");
+
+        sys.PCHRegister.value = 0xda;
+        sys.PCLRegister.value = 0xff;
+        sys.CEMESignal = true;
+        sys.Step();
+        assert((sys.PCLRegister.value == 0x00) && "increment PC, PCL overflow");
+        assert((sys.PCHRegister.value == 0xdb) && "increment PC, carry into PCH");
+    }
+
+    {
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("MAH MAL BNK test\n");
 
         sys.AOSignal = true;
-
-        sys.ARegister.value = 0xfe;
-        sys.milSignal = true;
-        sys.Step();
-        sys.milSignal = false;
-        assert((sys.MALRegister.value == 0xfe) && "load MAL");
-
         sys.ARegister.value = 0xca;
         sys.mihSignal = true;
         sys.Step();
         sys.mihSignal = false;
         assert((sys.MAHRegister.value == 0xca) && "load MAH");
 
+        sys.AOSignal = true;
+        sys.ARegister.value = 0xfe;
+        sys.milSignal = true;
+        sys.Step();
+        sys.milSignal = false;
+        assert((sys.MALRegister.value == 0xfe) && "load MAL");
+
+        sys.AOSignal = true;
         sys.ARegister.value = 0xff;
         sys.kiSignal = true;
         sys.Step();
@@ -802,7 +921,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("RAM write test\n");
 
@@ -817,7 +936,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("Flash write test\n");
 
@@ -833,7 +952,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("RAM read test\n");
 
@@ -846,7 +965,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("Flash read test\n");
 
@@ -860,7 +979,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("UART write test\n");
 
@@ -872,7 +991,7 @@ void TestSystem()
     }
 
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("UART read test\n");
 
@@ -887,7 +1006,7 @@ void TestSystem()
     
     auto testALU = [&](const char* what, uint8_t A, uint8_t B, bool EC, bool ES, bool EOFI, uint8_t result, uint8_t flagsbus, uint8_t flagsreg)
     {
-        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+        System sys; sys.MicrocodeROM.disableForDebug = true; sys.reset = true; sys.Step(); sys.reset = false;
 
         if(debug) printf("ALU test %s\n", what);
 
@@ -912,7 +1031,6 @@ void TestSystem()
     testALU("128+128 overflow, no EOFI", 0x80, 0x80, false, false, false, 0xFF, 3, 0);
     testALU("invert 0x55, no EOFI", 0, 0x55, false, true, false, 0xFF, 4, 0);
 }
-
 
 template <class MEMORY, class INTERFACE>
 struct MinimalEmulator
