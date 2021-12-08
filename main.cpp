@@ -709,6 +709,76 @@ struct ControlROM : public Block
     }
 };
 
+struct ControlLogic : public Block
+{
+    Wire& HISignal;
+    Wire& CISignal;
+    Wire& COSignal;
+    Wire& MISignal;
+    Wire& TRSignal;
+    Wire& CEMESignal;
+    Wire& ECSignal;
+    Wire& cohSignal;
+    Wire& colSignal;
+    Wire& cihSignal;
+    Wire& cilSignal;
+    Wire& mihSignal;
+    Wire& milSignal;
+    Wire& tiSignal;
+    Wire& toSignal;
+    Wire& iiSignal;
+    Wire& kiSignal;
+    bool oldHISignal;
+    bool oldCISignal;
+    bool oldCOSignal;
+    bool oldTRSignal;
+    bool oldMISignal;
+    bool oldCEMESignal;
+    bool oldECSignal;
+    ControlLogic(const std::string& name, Wire& HISignal, Wire& CISignal, Wire& COSignal, Wire& MISignal, Wire& TRSignal, Wire& CEMESignal, Wire& ECSignal, Wire& cohSignal, Wire& colSignal, Wire& cihSignal, Wire& cilSignal, Wire& mihSignal, Wire& milSignal, Wire& tiSignal, Wire& toSignal, Wire& iiSignal, Wire& kiSignal) :
+        Block(name),
+        HISignal(HISignal),
+        CISignal(CISignal),
+        COSignal(COSignal),
+        MISignal(MISignal),
+        TRSignal(TRSignal),
+        CEMESignal(CEMESignal),
+        ECSignal(ECSignal),
+        cohSignal(cohSignal),
+        colSignal(colSignal),
+        cihSignal(cihSignal),
+        cilSignal(cilSignal),
+        mihSignal(mihSignal),
+        milSignal(milSignal),
+        tiSignal(tiSignal),
+        toSignal(toSignal),
+        iiSignal(iiSignal),
+        kiSignal(kiSignal)
+    {}
+    bool Evaluate()
+    {
+        bool changed = false;
+        changed = changed || (oldHISignal != HISignal); oldHISignal = HISignal;
+        changed = changed || (oldCISignal != CISignal); oldCISignal = CISignal;
+        changed = changed || (oldCOSignal != COSignal); oldCOSignal = COSignal;
+        changed = changed || (oldMISignal != MISignal); oldMISignal = MISignal;
+        changed = changed || (oldTRSignal != TRSignal); oldTRSignal = TRSignal;
+        changed = changed || (oldCEMESignal != CEMESignal); oldCEMESignal = CEMESignal;
+        changed = changed || (oldECSignal != ECSignal); oldECSignal = ECSignal;
+        cihSignal = CISignal && HISignal;
+        cilSignal = CISignal && ~HISignal;
+        cohSignal = COSignal && HISignal;
+        colSignal = COSignal && ~HISignal;
+        mihSignal = MISignal && HISignal;
+        milSignal = MISignal && ~HISignal;
+        tiSignal = TRSignal && HISignal;
+        toSignal = TRSignal && ~HISignal;
+        iiSignal = CEMESignal && HISignal;
+        kiSignal = ECSignal && HISignal;
+        return changed;
+    }
+};
+
 struct System
 {
     Bus<8> MainBus{"MainBus"};
@@ -783,9 +853,9 @@ struct System
 
     ControlROM MicrocodeROM{"MicrocodeROM", FlagsToControlLogicBus, InstructionToControlLogicBus, StepToControlLogicBus, CISignal, COSignal, CEMESignal, TRSignal, ICSignal, ECSignal, ESSignal, EOFISignal, HISignal, MISignal, RISignal, ROSignal, AISignal, AOSignal, BISignal, BOSignal};
 
-    // ControlLogic Logic{"Logic", HI, CI, CO, ME, TR, CEME, EC, cohSignal, colSignal, cihSignal, cilSignal, mihSignal, milSignal, tiSignal, toSignal, iiSignal, kiSignal};
+    ControlLogic Logic{"Logic", HISignal, CISignal, COSignal, MISignal, TRSignal, CEMESignal, ECSignal, cohSignal, colSignal, cihSignal, cilSignal, mihSignal, milSignal, tiSignal, toSignal, iiSignal, kiSignal};
 
-    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU, &MicrocodeROM};
+    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU, &MicrocodeROM, &Logic};
 
     System()
     {
@@ -841,7 +911,7 @@ struct System
 void TestSystem()
 {
     {
-        System sys;
+        System sys; sys.MicrocodeROM.disableForDebug = true;
 
         if(debug) printf("Reset test\n");
         sys.reset = true;
@@ -1213,7 +1283,26 @@ int main(int argc, char **argv)
 
     if(true) {
         TestSystem();
-        exit(EXIT_FAILURE);
+        if(false) {
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    System sys;
+    {
+        FILE *fp = fopen(flash_file.c_str(), "rb");
+        if(!fp) {
+            throw "couldn't open " + flash_file;
+        }
+        fseek(fp, 0, SEEK_END);
+        long size = ftell(fp);
+        assert(size == FlashSize);
+        fseek(fp, 0, SEEK_SET);
+        fread(sys.Memory.Flash.data(), sys.Memory.Flash.size(), 1, fp);
+        fclose(fp);
+    }
+    while(1) {
+        sys.Step();
     }
 
     printf("Power up.\n");
