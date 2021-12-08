@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <unordered_map>
 #include <map>
 #include <string>
 #include <queue>
@@ -11,9 +10,6 @@
 #include <cassert>
 #include <cstring>
 #include <chrono>
-#include <random>
-#include <numeric>
-#include <thread>
 
 #include <MiniFB.h>
 
@@ -381,6 +377,31 @@ struct Register : public Block
     }
 };
 
+template <int SIZE, typename InputBus, typename OutputBus>
+struct RegisterWithTap : public Register<SIZE, InputBus, OutputBus>
+{
+    Bus<SIZE>& tap;
+
+    RegisterWithTap(const std::string& name, Wire& reset, Wire& clock, Wire& input_enable, Wire& output_enable, InputBus& input, std::vector<OutputBus*>outputs, Bus<SIZE>& tap) :
+        Register<SIZE, InputBus, OutputBus>(name, reset, clock, input_enable, output_enable, input, outputs),
+        tap(tap)
+    { }
+
+    RegisterWithTap<SIZE, InputBus, OutputBus>& operator=(uint32_t v)
+    {
+        this->value = v;
+        return *this;
+    }
+
+    virtual bool Evaluate()
+    {
+        bool changed = Register<SIZE, InputBus, OutputBus>::Evaluate();
+        changed = changed || (this->value != tap);
+        tap = this->value;
+        return changed;
+    }
+};
+
 struct Or : public Block
 {
     Wire& A;
@@ -491,6 +512,53 @@ struct ConsoleIO : public Block
     }
 };
 
+struct Adder : public Block
+{
+    Wire& ES;
+    Wire& EC;
+    Bus<8>& FromA;
+    Bus<8>& FromB;
+    Wire& EO;
+    Bus<8>& ResultOut;
+    Bus<3>& FlagsOut;
+    Buffer<8> value;
+
+    Adder(const std::string& name, Wire &clock, Wire& ES, Wire& EC, Bus<8>& FromA, Bus<8>& FromB, Wire& EO, Bus<8>& ResultOut, Bus<3>& FlagsOut) :
+        Block(name),
+        ES(ES),
+        EC(EC),
+        FromA(FromA),
+        FromB(FromB),
+        EO(EO),
+        ResultOut(ResultOut),
+        FlagsOut(FlagsOut),
+        value(name + "-name")
+    {}
+    virtual bool Evaluate()
+    {
+        bool changed = false;
+        uint8_t A = FromA;
+        uint8_t B = ES ? ~FromB : FromB;
+        uint32_t carry = EC ? 1 : 0;
+        uint32_t result = carry + A + B;
+        uint8_t N = (result & 0x80) ? 1 : 0;
+        uint8_t C = (result > 0xFF) ? 1 : 0;
+        uint8_t Z = ((result & 0xFF) == 0) ? 1 : 0;
+        uint8_t flags = (N << 2) | (C << 1) | (Z << 0);
+        // printf("%s: 0x%x+0x%x+0x%x yielding 0x%x, flags 0x%x\n", this->name.c_str(), carry, A, B, result & 0xFF, flags);
+        changed = changed || (flags != FlagsOut);
+        FlagsOut = (N << 2) | (C << 1) | (Z << 0);
+        if(EO) {
+            uint8_t value = result & 0xFF;
+            auto old = ResultOut;
+            ResultOut = value;
+            // printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
+            changed = changed || (old != value);
+        }
+        return changed;
+    }
+};
+
 struct RAMAndFlash : public Block
 {
     Wire& reset;
@@ -577,6 +645,8 @@ struct System
     Wire EOFISignal = false;
     Wire RISignal = false;
     Wire ROSignal = false;
+    Wire ESSignal = false;
+    Wire ECSignal = false;
     Wire cilSignal = false;
     Wire colSignal = false;
     Wire cihSignal = false;
@@ -593,10 +663,10 @@ struct System
     Wire clock = false;
     Wire nclock = true;
     Wire reset = true;
-    Bus<8> emptyBus{"emptyBus8"};
+    Bus<8> emptyBusForInputs{"emptyBusForInputs"};
 
-    Register<8, Bus<8>, Bus<8>> ARegister{"ARegister", reset, clock, AISignal, AOSignal, MainBus, {&MainBus, &AToAdder}};
-    Register<8, Bus<8>, Bus<8>> BRegister{"BRegister", reset, clock, BISignal, BOSignal, MainBus, {&MainBus, &BToAdder}};
+    RegisterWithTap<8, Bus<8>, Bus<8>> ARegister{"ARegister", reset, clock, AISignal, AOSignal, MainBus, {&MainBus}, AToAdder};
+    RegisterWithTap<8, Bus<8>, Bus<8>> BRegister{"BRegister", reset, clock, BISignal, BOSignal, MainBus, {&MainBus}, BToAdder};
     Register<8, Bus<8>, Bus<8>> PCLRegister{"PCLRegister", reset, clock, cilSignal, colSignal, MainBus, {&MainBus}};
     Register<8, Bus<8>, Bus<8>> PCHRegister{"PCHRegister", reset, clock, cihSignal, cohSignal, MainBus, {&MainBus}};
     Register<8, Bus<8>, Bus<8>> MALRegister{"MALRegister", reset, clock, milSignal, alwaysTrue, MainBus, {&MALToMemory}};
@@ -607,15 +677,17 @@ struct System
 
     Wire StepCounterReset;
     Or ICOrReset{"ICOrReset", ICSignal, reset, StepCounterReset};
-    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, alwaysFalse, alwaysTrue, emptyBus, {&StepToControlLogicBus}};
+    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}};
 
     RAMAndFlash Memory{"Memory", reset, clock, RISignal, ROSignal, MALToMemory, MAHToMemory, BANKToMemory, MainBus, {&MainBus}};
-    // Adder
-    // ControlLogic
 
     ConsoleIO UART{"UART", clock, tiSignal, toSignal, MainBus, {&MainBus}};
 
-    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART};
+    Adder ALU{"ALU", clock, ESSignal, ECSignal, AToAdder, BToAdder, EOFISignal, MainBus, AdderFlagsBus};
+
+    // ControlLogic
+
+    std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU};
 
     System()
     {
@@ -802,6 +874,33 @@ void TestSystem()
         sys.Step();
         assert((sys.ARegister.value == 0xFF) && "read UART");
     }
+    
+    auto testALU = [&](const char* what, uint8_t A, uint8_t B, bool EC, bool ES, bool EOFI, uint8_t result, uint8_t flagsbus, uint8_t flagsreg)
+    {
+        System sys; sys.reset = true; sys.Step(); sys.reset = false;
+
+        if(debug) printf("ALU test %s\n", what);
+
+        sys.ARegister = A;
+        sys.BRegister = B;
+        sys.ECSignal = EC;
+        sys.ESSignal = ES;
+        sys.EOFISignal = EOFI;
+        sys.Step();
+        assert(sys.MainBus == result);
+        assert(sys.AdderFlagsBus == flagsbus);
+        assert((uint32_t)sys.FlagsRegister.value == flagsreg);
+    };
+    testALU("0+0", 0, 0, false, false, true, 0, 1, 1);
+    testALU("1+1", 1, 1, false, false, true, 2, 0, 0);
+    testALU("63+0", 63, 0, false, false, true, 63, 0, 0);
+    testALU("-128+1", 0x80, 0, false, false, true, 0x80, 4, 4);
+    testALU("-128+1", 0x80, 1, false, false, true, 0x81, 4, 4);
+    testALU("128+128 overflow", 0x80, 0x80, false, false, true, 0, 3, 3);
+    testALU("invert 0x55", 0, 0x55, false, true, true, 0xAA, 4, 4);
+    testALU("invert 0xFF", 0, 0xFF, false, true, true, 0x0, 1, 1);
+    testALU("128+128 overflow, no EOFI", 0x80, 0x80, false, false, false, 0, 3, 0);
+    testALU("invert 0x55, no EOFI", 0, 0x55, false, true, false, 0, 4, 0);
 }
 
 
