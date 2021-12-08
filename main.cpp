@@ -243,6 +243,10 @@ typedef bool Wire;
 
 template <int SIZE> struct Buffer;
 
+// XXX should probably be constructed with tied-high / tied-low / floating state so
+// has the correct values when not asserted from some Block.  But then would need some
+// kind of event to de-assert from Blocks (part of Evaluate on clock falling?) and a
+// method on Bus to un-drive in order to re-assert the tied-high state.
 template <int SIZE>
 struct Bus: public std::array<Wire, SIZE>
 {
@@ -426,11 +430,13 @@ template <int SIZE, typename InputBus, typename OutputBus>
 struct Counter : public Register<SIZE, InputBus, OutputBus>
 {
     Wire& load;
+    Wire& carry;
     bool oldclock = false;
 
-    Counter(const std::string& name, Wire& reset, Wire& clock, Wire& load, Wire& output_enable, InputBus& input, std::vector<OutputBus*> outputs) :
+    Counter(const std::string& name, Wire& reset, Wire& clock, Wire& load, Wire& output_enable, InputBus& input, std::vector<OutputBus*> outputs, Wire& carry) :
         Register<SIZE, InputBus, OutputBus>(name, reset, clock, load, output_enable, input, outputs),
-        load(load)
+        load(load),
+        carry(carry)
     {
     }
     virtual bool Evaluate()
@@ -446,6 +452,7 @@ struct Counter : public Register<SIZE, InputBus, OutputBus>
             } else {
                 if(!oldclock && this->clock) {
                     changed = true;
+                    carry = (this->value + 1 >= (1 << SIZE));
                     this->value = this->value + 1;
                 }
             }
@@ -677,7 +684,8 @@ struct System
 
     Wire StepCounterReset;
     Or ICOrReset{"ICOrReset", ICSignal, reset, StepCounterReset};
-    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}};
+    Wire carry_discarded;
+    Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}, carry_discarded};
 
     RAMAndFlash Memory{"Memory", reset, clock, RISignal, ROSignal, MALToMemory, MAHToMemory, BANKToMemory, MainBus, {&MainBus}};
 
@@ -685,7 +693,7 @@ struct System
 
     Adder ALU{"ALU", clock, ESSignal, ECSignal, AToAdder, BToAdder, EOFISignal, MainBus, AdderFlagsBus};
 
-    // ControlLogic
+    // ControlROMAndLogic ControlLogic{"Control", clock, EOFISignal, iiSignal, ICSignal, CISignal, COSignal, CEMESignal, TRSignal, ICSignal, ECSignal, ESSignal, EOFISignal, HISignal, MISignal, RISignal, ROSignal, AISignal, AOSignal, BISignal, BOSignal, cohSignal, colSignal, cihSignal, cilSignal, mihSignal, milSignal, tiSignal, toSignal, iiSignal, kiSignal};
 
     std::vector<Block*> blocks = {&ICOrReset, &ARegister, &BRegister, &PCLRegister, &PCHRegister, &MALRegister, &MAHRegister, &BANKRegister, &FlagsRegister, &InstructionRegister, &StepCounter, &Memory, &UART, &ALU};
 
@@ -697,6 +705,7 @@ struct System
     {
         bool changed;
 
+        MainBus = 0xFF; // XXX this should be part of bus state? - tied high, tied low, floats?
         clock = true;
         nclock = !clock;
         int cycles = 0;
@@ -750,6 +759,7 @@ void TestSystem()
         assert((sys.StepCounter.value == 0) && "reset StepCounter");
         assert((sys.ARegister.value == 0) && "reset ARegister");
         assert((sys.BRegister.value == 0) && "reset BRegister");
+        assert((sys.MainBus == 0xFF) && "MainBus unasserted is 0xFF");
     }
 
     {
@@ -899,8 +909,8 @@ void TestSystem()
     testALU("128+128 overflow", 0x80, 0x80, false, false, true, 0, 3, 3);
     testALU("invert 0x55", 0, 0x55, false, true, true, 0xAA, 4, 4);
     testALU("invert 0xFF", 0, 0xFF, false, true, true, 0x0, 1, 1);
-    testALU("128+128 overflow, no EOFI", 0x80, 0x80, false, false, false, 0, 3, 0);
-    testALU("invert 0x55, no EOFI", 0, 0x55, false, true, false, 0, 4, 0);
+    testALU("128+128 overflow, no EOFI", 0x80, 0x80, false, false, false, 0xFF, 3, 0);
+    testALU("invert 0x55, no EOFI", 0, 0x55, false, true, false, 0xFF, 4, 0);
 }
 
 
