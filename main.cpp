@@ -13,8 +13,8 @@
 
 #include <MiniFB.h>
 
-constexpr bool debug = false;
-constexpr int QuiescentEvaluateMaxCycles = 100;
+constexpr bool debug = true;
+constexpr int QuiescentEvaluateMaxCycles = 10;
 constexpr uint64_t SystemClockRate = 3686400;
 constexpr uint64_t CPUClockRate = 3686400;
 
@@ -434,6 +434,7 @@ struct Counter : public Register<SIZE, InputBus, OutputBus>
     Wire& carry;
     bool oldclock = false;
 
+    // Counter<4, Bus<8>, Bus<4>> StepCounter{"StepCounter", StepCounterReset, nclock, nclock, alwaysFalse, alwaysTrue, emptyBusForInputs, {&StepToControlLogicBus}, carry_discarded};
     Counter(const std::string& name, Wire& reset, Wire& clock, Wire& increment, Wire& load, Wire& output_enable, InputBus& input, std::vector<OutputBus*> outputs, Wire& carry) :
         Register<SIZE, InputBus, OutputBus>(name, reset, clock, load, output_enable, input, outputs),
         load(load),
@@ -441,31 +442,39 @@ struct Counter : public Register<SIZE, InputBus, OutputBus>
         carry(carry)
     {
     }
+
+    Counter<SIZE, InputBus, OutputBus>& operator=(uint32_t v)
+    {
+        this->value = v;
+        return *this;
+    }
+
     virtual bool Evaluate()
     {
         bool changed = false;
         if(this->reset) {
             changed = this->value != 0;
             this->value = 0;
+            printf("reset step counter\n");
+        } else if(!oldclock && this->clock && load) {
+            changed = this->value != this->input;
+            this->value = this->input;
+            printf("load %s counter, now %d\n", this->name.c_str(), (uint32_t) this->value);
         } else {
-            if(load) {
-                changed = this->value != this->input;
-                this->value = this->input;
-            } else {
-                if(!oldclock && this->clock & increment) {
-                    changed = true;
-                    carry = (this->value + 1 >= (1 << SIZE));
-                    this->value = this->value + 1;
-                }
+            if(!oldclock && this->clock & increment) {
+                changed = true;
+                carry = (this->value + 1 >= (1 << SIZE));
+                this->value = this->value + 1;
+                printf("increment %s counter, now %d\n", this->name.c_str(), (uint32_t) this->value);
             }
         }
         if(this->clock && this->output_enable) {
             for(auto* output: this->outputs) {
                 auto old = *output;
-                // printf("old output value = 0x%x\n", (uint32_t) old);
+                printf("%s counter, old output value = 0x%x\n", this->name.c_str(), (uint32_t) old);
                 changed = changed || (*output != this->value);
                 *output = this->value;
-                // printf("new output value = 0x%x\n", (uint32_t) *output);
+                printf("%s counter, new output value = 0x%x\n", this->name.c_str(), (uint32_t) *output);
             }
         }
         oldclock = this->clock;
@@ -601,13 +610,13 @@ struct RAMAndFlash : public Block
         uint16_t ramaddress = ((memory_address_high & 0x7F) << 8) | (memory_address_low);
         uint32_t flashaddress = (bank << 11) | ((memory_address_high & 0x7F) << 8) | (memory_address_low);
         if(input_enable) {
-            // printf("%s input enabled; is_ram = %d, MA = 0x%x, ramaddress = 0x%x, flashaddress = 0x%x\n", this->name.c_str(), is_ram ? 1 : 0, (memory_address_high << 8) | (memory_address_low), ramaddress, flashaddress);
+            printf("%s input enabled; is_ram = %d, MA = 0x%x, ramaddress = 0x%x, flashaddress = 0x%x\n", this->name.c_str(), is_ram ? 1 : 0, (memory_address_high << 8) | (memory_address_low), ramaddress, flashaddress);
             if(is_ram) {
-                // printf("%s input enable, write 0x%x to RAM 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                printf("%s input enable, write 0x%x to RAM 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
                 changed = RAM[ramaddress] != input;
                 RAM[ramaddress] = input;
             } else {
-                // printf("%s input enable, write 0x%x to Flash 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
+                printf("%s input enable, write 0x%x to Flash 0x%x\n", this->name.c_str(), (uint32_t)input, ramaddress);
                 changed = Flash[flashaddress] != input;
                 Flash[flashaddress] = input;
             }
@@ -616,15 +625,15 @@ struct RAMAndFlash : public Block
             uint8_t value;
             if(!is_ram) {
                 value = Flash[flashaddress];
-                // printf("%s output enable, read 0x%x from Flash 0x%x\n", this->name.c_str(), value, flashaddress);
+                printf("%s output enable, read 0x%x from Flash 0x%x\n", this->name.c_str(), value, flashaddress);
             } else {
                 value = RAM[ramaddress];
-                // printf("%s output enable, read 0x%x from RAM 0x%x\n", this->name.c_str(), value, ramaddress);
+                printf("%s output enable, read 0x%x from RAM 0x%x\n", this->name.c_str(), value, ramaddress);
             }
             for(auto* output: this->outputs) {
                 auto old = *output;
                 *output = value;
-                // printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
+                printf("%s output enable, write 0x%x\n", this->name.c_str(), value);
                 changed = changed || (old != value);
             }
         }
@@ -653,6 +662,7 @@ struct ControlROM : public Block
     Wire& AOSignal;
     Wire& BISignal;
     Wire& BOSignal;
+    uint16_t microcode_word;
 
     bool disableForDebug = false;
 
@@ -688,7 +698,7 @@ struct ControlROM : public Block
         uint32_t romaddress = (flags << 10) | (instruction << 4) | (step << 0);
         bool changed = romaddress != oldromaddress;
         oldromaddress = romaddress;
-        uint16_t microcode_word = mEEPROM[romaddress];
+        microcode_word = mEEPROM[romaddress];
         CISignal = microcode_word & CI;
         COSignal = microcode_word & CO;
         CEMESignal = microcode_word & CEME;
@@ -766,13 +776,13 @@ struct ControlLogic : public Block
         changed = changed || (oldCEMESignal != CEMESignal); oldCEMESignal = CEMESignal;
         changed = changed || (oldECSignal != ECSignal); oldECSignal = ECSignal;
         cihSignal = CISignal && HISignal;
-        cilSignal = CISignal && ~HISignal;
+        cilSignal = CISignal && !HISignal;
         cohSignal = COSignal && HISignal;
-        colSignal = COSignal && ~HISignal;
+        colSignal = COSignal && !HISignal;
         mihSignal = MISignal && HISignal;
-        milSignal = MISignal && ~HISignal;
+        milSignal = MISignal && !HISignal;
         tiSignal = TRSignal && HISignal;
-        toSignal = TRSignal && ~HISignal;
+        toSignal = TRSignal && !HISignal;
         iiSignal = CEMESignal && HISignal;
         kiSignal = ECSignal && HISignal;
         return changed;
@@ -829,14 +839,19 @@ struct System
 
     RegisterWithTap<8, Bus<8>, Bus<8>> ARegister{"ARegister", reset, clock, AISignal, AOSignal, MainBus, {&MainBus}, AToAdder};
     RegisterWithTap<8, Bus<8>, Bus<8>> BRegister{"BRegister", reset, clock, BISignal, BOSignal, MainBus, {&MainBus}, BToAdder};
-    // XXX PC is supposed to be hooked to CEME for increment on clock
+
     Wire PCLcarry;
     Wire PCHcarry_discard;
     Counter<8, Bus<8>, Bus<8>> PCLRegister{"PCLRegister", reset, clock, CEMESignal, cilSignal, colSignal, MainBus, {&MainBus}, PCLcarry};
     Counter<8, Bus<8>, Bus<8>> PCHRegister{"PCHRegister", reset, clock, PCLcarry, cihSignal, cohSignal, MainBus, {&MainBus}, PCHcarry_discard};
-    Register<8, Bus<8>, Bus<8>> MALRegister{"MALRegister", reset, clock, milSignal, alwaysTrue, MainBus, {&MALToMemory}};
-    Register<8, Bus<8>, Bus<8>> MAHRegister{"MAHRegister", reset, clock, mihSignal, alwaysTrue, MainBus, {&MAHToMemory}};
+
+    Wire MALcarry;
+    Wire MAHcarry_discard;
+    Counter<8, Bus<8>, Bus<8>> MALRegister{"MALRegister", reset, clock, CEMESignal, milSignal, alwaysTrue, MainBus, {&MALToMemory}, MALcarry};
+    Counter<8, Bus<8>, Bus<8>> MAHRegister{"MAHRegister", reset, clock, MALcarry, mihSignal, alwaysTrue, MainBus, {&MAHToMemory}, MAHcarry_discard};
+
     Register<4, Bus<8>, Bus<4>> BANKRegister{"BANKRegister", reset, clock, kiSignal, alwaysTrue, MainBus, {&BANKToMemory}};
+
     Register<3, Bus<3>, Bus<3>> FlagsRegister{"FlagsRegister", reset, clock, EOFISignal, alwaysTrue, AdderFlagsBus, {&FlagsToControlLogicBus}};
     Register<6, Bus<8>, Bus<6>> InstructionRegister{"InstructionRegister", reset, nclock, iiSignal, alwaysTrue, MainBus, {&InstructionToControlLogicBus}};
 
@@ -878,10 +893,8 @@ struct System
             for(auto* b : blocks) {
                 bool block_changed = b->Evaluate();
                 changed = changed || block_changed;
-                if(debug) printf("        %s output %s\n", b->name.c_str(), block_changed ? "changed" : "did not change");
+                if(debug && block_changed) printf("        %s output changed\n", b->name.c_str());
             }
-            if(debug) printf("        ARegister = 0x%x:\n", (uint32_t)ARegister.value);
-            if(debug) printf("        BRegister = 0x%x:\n", (uint32_t)BRegister.value);
             if(debug) printf("        MainBus = 0x%x:\n", (uint32_t)MainBus);
             cycles++;
         } while(changed);
@@ -898,13 +911,12 @@ struct System
             for(auto* b : blocks) {
                 bool block_changed = b->Evaluate();
                 changed = changed || block_changed;
-                if(debug) printf("        %s output %s\n", b->name.c_str(), block_changed ? "changed" : "did not change");
+                if(debug && block_changed) printf("        %s output changed\n", b->name.c_str());
             }
-            if(debug) printf("        ARegister = 0x%x:\n", (uint32_t)ARegister.value);
-            if(debug) printf("        BRegister = 0x%x:\n", (uint32_t)BRegister.value);
             if(debug) printf("        MainBus = 0x%x:\n", (uint32_t)MainBus);
             cycles++;
         } while(changed);
+        reset = false;
     }
 };
 
@@ -916,10 +928,13 @@ void TestSystem()
         if(debug) printf("Reset test\n");
         sys.reset = true;
         sys.Step();
+        sys.reset = false;
         assert((sys.StepCounter.value == 0) && "reset StepCounter");
         assert((sys.ARegister.value == 0) && "reset ARegister");
         assert((sys.BRegister.value == 0) && "reset BRegister");
         assert((sys.MainBus == 0xFF) && "MainBus unasserted is 0xFF");
+        sys.Step();
+        assert((sys.StepCounter.value == 1) && "increment StepCounter");
     }
 
     {
@@ -1239,6 +1254,74 @@ void usage(const char *name)
     // --clock mhz
 }
 
+std::vector<std::string> InstructionToMnemonic =
+{
+    "NOP",
+    "BNK",
+    "OUT",
+    "CLC",
+    "SEC",
+    "LSL",
+    "ROL",
+    "LSR",
+    "ROR",
+    "ASR",
+    "INP",
+    "NEG",
+    "Inc",
+    "Dec",
+    "LDI",
+    "ADI",
+    "SBI",
+    "CPI",
+    "ACI",
+    "SCI",
+    "JPA",
+    "LDA",
+    "STA",
+    "ADA",
+    "SBA",
+    "CPA",
+    "ACA",
+    "SCA",
+    "JPR",
+    "LDR",
+    "STR",
+    "ADR",
+    "SBR",
+    "CPR",
+    "ACR",
+    "SCR",
+    "CLB",
+    "NEB",
+    "INB",
+    "DEB",
+    "ADB",
+    "SBB",
+    "ACB",
+    "SCB",
+    "CLW",
+    "NEW",
+    "INW",
+    "DEW",
+    "ADW",
+    "SBW",
+    "ACW",
+    "SCW",
+    "LDS",
+    "STS",
+    "PHS",
+    "PLS",
+    "JPS",
+    "RTS",
+    "BNE",
+    "BEQ",
+    "BCC",
+    "BCS",
+    "BPL",
+    "BMI",
+};
+
 int main(int argc, char **argv)
 {
     const char *progname = argv[0];
@@ -1281,7 +1364,7 @@ int main(int argc, char **argv)
 
     std::chrono::time_point<std::chrono::system_clock> interfaceThen = std::chrono::system_clock::now();
 
-    if(true) {
+    if(false) {
         TestSystem();
         if(false) {
             exit(EXIT_FAILURE);
@@ -1302,6 +1385,40 @@ int main(int argc, char **argv)
         fclose(fp);
     }
     while(1) {
+        uint16_t pc = (sys.PCHRegister.value << 8) | sys.PCLRegister.value;
+        printf("0x%04X : 0x%02X\n", pc, sys.Memory.Flash[pc]);
+        printf("    instruction 0x%02X (%s)\n", (uint32_t)sys.InstructionRegister.value,
+            InstructionToMnemonic[(uint32_t)sys.InstructionRegister.value & 0x3F].c_str());
+        printf("    flags %d\n", (uint32_t)sys.FlagsRegister.value);
+        printf("    step %d\n", (uint32_t)sys.StepCounter.value);
+        printf("    microcode %04X ", (uint32_t)sys.MicrocodeROM.microcode_word);
+        if(sys.MicrocodeROM.microcode_word & AI) { printf("AI "); }
+        if(sys.MicrocodeROM.microcode_word & AO) { printf("AO "); }
+        if(sys.MicrocodeROM.microcode_word & BI) { printf("BI "); }
+        if(sys.MicrocodeROM.microcode_word & BO) { printf("BO "); }
+        if(sys.MicrocodeROM.microcode_word & CI) { printf("CI "); }
+        if(sys.MicrocodeROM.microcode_word & CO) { printf("CO "); }
+        if(sys.MicrocodeROM.microcode_word & EC) { printf("EC "); }
+        if(sys.MicrocodeROM.microcode_word & ES) { printf("ES "); }
+        if(sys.MicrocodeROM.microcode_word & CEME) { printf("CEME "); }
+        if(sys.MicrocodeROM.microcode_word & EOFI) { printf("EOFI "); }
+        if(sys.MicrocodeROM.microcode_word & HI) { printf("HI "); }
+        if(sys.MicrocodeROM.microcode_word & IC) { printf("IC "); }
+        if(sys.MicrocodeROM.microcode_word & MI) { printf("MI "); }
+        if(sys.MicrocodeROM.microcode_word & RI) { printf("RI "); }
+        if(sys.MicrocodeROM.microcode_word & RO) { printf("RO "); }
+        if(sys.MicrocodeROM.microcode_word & TR) { printf("TR "); }
+        if(sys.cilSignal) { printf("cil "); }
+        if(sys.colSignal) { printf("col "); }
+        if(sys.cihSignal) { printf("cih "); }
+        if(sys.cohSignal) { printf("coh "); }
+        if(sys.milSignal) { printf("mil "); }
+        if(sys.mihSignal) { printf("mih "); }
+        if(sys.kiSignal) { printf("ki "); }
+        if(sys.iiSignal) { printf("ii "); }
+        if(sys.tiSignal) { printf("ti "); }
+        if(sys.toSignal) { printf("to "); }
+        puts("");
         sys.Step();
     }
 
